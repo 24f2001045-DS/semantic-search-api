@@ -11,40 +11,26 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # -----------------------------
 # Dummy 100 product reviews
-# Replace with real dataset
 # -----------------------------
 documents = [
     {"id": i, "content": f"This product review {i} talks about battery, performance and quality"}
     for i in range(100)
 ]
 
-# -----------------------------
-# Cache embeddings
-# -----------------------------
-doc_embeddings = []
+doc_embeddings = None  # will load lazily
 
-def get_embedding(text: str):
+# -----------------------------
+# Embedding function
+# -----------------------------
+def get_embedding(texts):
     res = client.embeddings.create(
         model="text-embedding-3-small",
-        input=text
+        input=texts
     )
-    return np.array(res.data[0].embedding)
+    return [np.array(e.embedding) for e in res.data]
 
 def cosine_similarity(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
-
-# Precompute embeddings at startup
-@app.on_event("startup")
-def embed_docs():
-    global doc_embeddings
-    if not doc_embeddings:
-        texts = [doc["content"] for doc in documents]
-        res = client.embeddings.create(
-            model="text-embedding-3-small",
-            input=texts
-        )
-        doc_embeddings = [np.array(e.embedding) for e in res.data]
-        print("✅ Document embeddings cached")
 
 # -----------------------------
 # Request schema
@@ -64,11 +50,11 @@ Query: "{query}"
 Document: "{doc}"
 
 Rate relevance from 0 to 10.
-Respond ONLY with number.
+Respond ONLY number.
 """
     resp = client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[{"role":"user","content":prompt}],
+        messages=[{"role": "user", "content": prompt}],
         temperature=0
     )
 
@@ -77,16 +63,16 @@ Respond ONLY with number.
     except:
         score = 5.0
 
-    return score / 10  # normalize 0-1
+    return score / 10
 
 # -----------------------------
 # Search endpoint
 # -----------------------------
 @app.post("/")
 def semantic_search(req: SearchRequest):
+    global doc_embeddings
     start = time.time()
 
-    # edge case empty query
     if not req.query.strip():
         return {
             "results": [],
@@ -94,7 +80,12 @@ def semantic_search(req: SearchRequest):
             "metrics": {"latency": 0, "totalDocs": len(documents)}
         }
 
-    query_emb = get_embedding(req.query)
+    # ---- LAZY EMBEDDING LOAD (fix for render crash) ----
+    if doc_embeddings is None:
+        texts = [doc["content"] for doc in documents]
+        doc_embeddings = get_embedding(texts)
+
+    query_emb = get_embedding([req.query])[0]
 
     # -------- Initial Retrieval --------
     sims = []
